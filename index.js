@@ -4,7 +4,10 @@ const cors = require('cors');
 const axios = require('axios');
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
-const serviceAccount = require('./serviceAccountKey.json');
+
+// Load Firebase service account from an environment variable instead of a
+// local JSON file (the file is never pushed to GitHub for security reasons).
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 
 initializeApp({ credential: cert(serviceAccount) });
 const db = getFirestore(); // kept in case you need it elsewhere; not written to here
@@ -60,8 +63,6 @@ app.post('/send-otp', async (req, res) => {
 });
 
 // ---------- Step 2: Verify OTP ----------
-// Note: does NOT touch Firestore itself — the frontend already handles
-// checking/creating the user doc after this returns success (unchanged from before).
 app.post('/verify-otp', (req, res) => {
   const { phone, otp } = req.body;
   const record = otpStore[phone];
@@ -81,4 +82,4 @@ app.post('/verify-otp', (req, res) => {
   res.json({ success: true });
 });
 
-app.listen(3000, () => console.log('Server chalu chhe port 3000 par'));
+app.listen(process.env.PORT || 3000, () => console.log('Server chalu chhe'));
