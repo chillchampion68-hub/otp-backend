@@ -55,9 +55,11 @@ app.post('/send-otp', async (req, res) => {
       otpStore[phone] = { otp, expiresAt: Date.now() + 5 * 60 * 1000 }; // 5 min expiry
       res.json({ success: true, message: 'OTP sent successfully' });
     } else {
+      console.error('FAST2SMS REJECTED:', JSON.stringify(response.data));
       res.status(500).json({ success: false, message: 'Failed to send OTP', error: response.data });
     }
   } catch (err) {
+    console.error('SEND-OTP ERROR:', err.response?.data || err.message);
     res.status(500).json({ success: false, error: err.response?.data || err.message });
   }
 });
