@@ -3,40 +3,82 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const { initializeApp, cert } = require('firebase-admin/app');
-const { getFirestore, FieldValue } = require('firebase-admin/firestore');
-const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT
-  ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
-  : require('./serviceAccountKey.json');
+const { getFirestore } = require('firebase-admin/firestore');
+const serviceAccount = require('./serviceAccountKey.json');
 
 initializeApp({ credential: cert(serviceAccount) });
-const db = getFirestore();
+const db = getFirestore(); // kept in case you need it elsewhere; not written to here
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const AUTHKEY = process.env.MSG91_AUTHKEY;
+const FAST2SMS_API_KEY = process.env.FAST2SMS_API_KEY;
+const FAST2SMS_URL = 'https://www.fast2sms.com/dev/bulkV2';
 
-app.post('/verify-access-token', async (req, res) => {
-  const { accessToken, phone } = req.body;
+// In-memory OTP store. Key = phone exactly as frontend sends it (e.g. "919106820129")
+const otpStore = {};
+
+// ---------- Step 1: Send OTP ----------
+app.post('/send-otp', async (req, res) => {
+  const { phone } = req.body; // e.g. "919106820129" (91 + 10 digit, from getFullPhone())
+
+  if (!phone || phone.length < 10) {
+    return res.status(400).json({ success: false, message: 'Valid phone number required' });
+  }
+
+  const smsNumber = phone.slice(-10); // Fast2SMS ne 10 digit j joie, country code vagar
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
   try {
     const response = await axios.post(
-      'https://control.msg91.com/api/v5/widget/verifyAccessToken',
-      { authkey: AUTHKEY, 'access-token': accessToken }
+      FAST2SMS_URL,
+      {
+        route: 'q', // Quick Transactional route - no DLT required
+        message: `Your VoltMaster OTP is ${otp}. Do not share this with anyone.`,
+        language: 'english',
+        flash: 0,
+        numbers: smsNumber,
+      },
+      {
+        headers: {
+          authorization: FAST2SMS_API_KEY,
+          'Content-Type': 'application/json',
+        },
+      }
     );
 
-    if (response.data.type === 'success') {
-      await db.collection('users').doc(phone).set({
-        phone: phone,
-        verifiedAt: FieldValue.serverTimestamp()
-      });
-      res.json({ success: true });
+    if (response.data.return === true) {
+      otpStore[phone] = { otp, expiresAt: Date.now() + 5 * 60 * 1000 }; // 5 min expiry
+      res.json({ success: true, message: 'OTP sent successfully' });
     } else {
-      res.status(400).json({ success: false, message: 'Invalid token' });
+      res.status(500).json({ success: false, message: 'Failed to send OTP', error: response.data });
     }
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({ success: false, error: err.response?.data || err.message });
   }
+});
+
+// ---------- Step 2: Verify OTP ----------
+// Note: does NOT touch Firestore itself — the frontend already handles
+// checking/creating the user doc after this returns success (unchanged from before).
+app.post('/verify-otp', (req, res) => {
+  const { phone, otp } = req.body;
+  const record = otpStore[phone];
+
+  if (!record) {
+    return res.status(400).json({ success: false, message: 'No OTP found, please request a new one' });
+  }
+  if (Date.now() > record.expiresAt) {
+    delete otpStore[phone];
+    return res.status(400).json({ success: false, message: 'OTP expired' });
+  }
+  if (record.otp !== otp) {
+    return res.status(400).json({ success: false, message: 'Invalid OTP' });
+  }
+
+  delete otpStore[phone];
+  res.json({ success: true });
 });
 
 app.listen(3000, () => console.log('Server chalu chhe port 3000 par'));
