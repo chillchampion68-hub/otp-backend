@@ -16,6 +16,10 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Partner document upload -> private GitHub repo (see partnerUploadRoutes.js)
+app.set("trust proxy", 1);
+app.use(require("./partnerUploadRoutes"));
+
 const FAST2SMS_API_KEY = process.env.FAST2SMS_API_KEY;
 const FAST2SMS_URL = 'https://www.fast2sms.com/dev/bulkV2';
 
