@@ -30,6 +30,23 @@ const otpStore = {};
 const lastSent = {};
 const COOLDOWN_MS = 30 * 1000;
 
+// Fast2SMS ne call kare. Error aave to pan temno response (data) pacho aape,
+// jethi status_code (jem ke 996) check kari shakay.
+async function callFast2SMS(payload) {
+  try {
+    const r = await axios.post(FAST2SMS_URL, payload, {
+      headers: {
+        authorization: FAST2SMS_API_KEY,
+        'Content-Type': 'application/json',
+      },
+    });
+    return r.data;
+  } catch (err) {
+    if (err.response && err.response.data) return err.response.data;
+    throw err;
+  }
+}
+
 // ---------- Step 1: Send OTP ----------
 app.post('/send-otp', async (req, res) => {
   const { phone } = req.body; // e.g. "919106820129" (91 + 10 digit, from getFullPhone())
@@ -51,30 +68,35 @@ app.post('/send-otp', async (req, res) => {
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
   try {
-    // OTP route: Fast2SMS ni potani template ma OTP nakhi ne moklse ("Your OTP: 123456")
-    // Quick SMS (route 'q') nahi, etle ₹5 nahi lage
-    const response = await axios.post(
-      FAST2SMS_URL,
-      {
-        route: 'otp',
-        variables_values: otp,
-        numbers: smsNumber,
-      },
-      {
-        headers: {
-          authorization: FAST2SMS_API_KEY,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
+    // 1) Pehla OTP route (website verification thaya pachi ₹5 nahi lage)
+    let data = await callFast2SMS({
+      route: 'otp',
+      variables_values: otp,
+      numbers: smsNumber,
+    });
+    let usedRoute = 'otp';
 
-    if (response.data.return === true) {
+    // 2) Jo 996 (website verification baki) aave, to Quick SMS (₹5) thi moklo
+    if (data.return !== true && Number(data.status_code) === 996) {
+      console.log('OTP route verification pending (996) - falling back to Quick SMS (Rs 5)');
+      data = await callFast2SMS({
+        route: 'q',
+        message: `Your VoltMaster OTP is ${otp}. Do not share this with anyone.`,
+        language: 'english',
+        flash: 0,
+        numbers: smsNumber,
+      });
+      usedRoute = 'q';
+    }
+
+    if (data.return === true) {
       otpStore[phone] = { otp, expiresAt: Date.now() + 5 * 60 * 1000 }; // 5 min expiry
       lastSent[smsNumber] = Date.now();
+      console.log('OTP sent via route:', usedRoute);
       res.json({ success: true, message: 'OTP sent successfully' });
     } else {
-      console.error('FAST2SMS REJECTED:', JSON.stringify(response.data));
-      res.status(500).json({ success: false, message: 'Failed to send OTP', error: response.data });
+      console.error('FAST2SMS REJECTED:', JSON.stringify(data));
+      res.status(500).json({ success: false, message: 'Failed to send OTP', error: data });
     }
   } catch (err) {
     console.error('SEND-OTP ERROR:', err.response?.data || err.message);
