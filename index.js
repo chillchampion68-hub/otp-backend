@@ -20,23 +20,15 @@ app.use(express.json());
 app.set("trust proxy", 1);
 app.use(require("./partnerUploadRoutes"));
 
-// ---------- Fast2SMS Smart OTP (WhatsApp first, SMS fallback) ----------
-// Render Environment ma aa 2 joiye:
-//   FAST2SMS_API_KEY  = tamari API key
-//   FAST2SMS_OTP_ID   = Fast2SMS panel > Smart OTP mathi malelo OTP ID
 const FAST2SMS_API_KEY = process.env.FAST2SMS_API_KEY;
-const FAST2SMS_OTP_ID = process.env.FAST2SMS_OTP_ID;
-const FAST2SMS_OTP_SEND_URL = 'https://www.fast2sms.com/dev/otp/send';
-const FAST2SMS_OTP_VERIFY_URL = 'https://www.fast2sms.com/dev/otp/verify';
+const FAST2SMS_URL = 'https://www.fast2sms.com/dev/bulkV2';
+
+// In-memory OTP store. Key = phone exactly as frontend sends it (e.g. "919106820129")
+const otpStore = {};
 
 // Ek number par 30 sec ma ek j OTP (spam / paisa no waste rokva)
 const lastSent = {};
 const COOLDOWN_MS = 30 * 1000;
-
-const f2sHeaders = {
-  authorization: FAST2SMS_API_KEY,
-  'Content-Type': 'application/json',
-};
 
 // ---------- Step 1: Send OTP ----------
 app.post('/send-otp', async (req, res) => {
@@ -56,15 +48,28 @@ app.post('/send-otp', async (req, res) => {
     return res.status(429).json({ success: false, message: 'Please wait 30 seconds and try again' });
   }
 
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
   try {
-    // Fast2SMS pote OTP banave chhe, WhatsApp par moklse, fail thay to SMS par
+    // OTP route: Fast2SMS ni potani template ma OTP nakhi ne moklse ("Your OTP: 123456")
+    // Quick SMS (route 'q') nahi, etle ₹5 nahi lage
     const response = await axios.post(
-      FAST2SMS_OTP_SEND_URL,
-      { otp_id: FAST2SMS_OTP_ID, mobile: smsNumber },
-      { headers: f2sHeaders }
+      FAST2SMS_URL,
+      {
+        route: 'otp',
+        variables_values: otp,
+        numbers: smsNumber,
+      },
+      {
+        headers: {
+          authorization: FAST2SMS_API_KEY,
+          'Content-Type': 'application/json',
+        },
+      }
     );
 
     if (response.data.return === true) {
+      otpStore[phone] = { otp, expiresAt: Date.now() + 5 * 60 * 1000 }; // 5 min expiry
       lastSent[smsNumber] = Date.now();
       res.json({ success: true, message: 'OTP sent successfully' });
     } else {
@@ -78,38 +83,23 @@ app.post('/send-otp', async (req, res) => {
 });
 
 // ---------- Step 2: Verify OTP ----------
-app.post('/verify-otp', async (req, res) => {
+app.post('/verify-otp', (req, res) => {
   const { phone, otp } = req.body;
+  const record = otpStore[phone];
 
-  if (!phone || phone.length < 10 || !otp) {
-    return res.status(400).json({ success: false, message: 'Phone and OTP required' });
+  if (!record) {
+    return res.status(400).json({ success: false, message: 'No OTP found, please request a new one' });
+  }
+  if (Date.now() > record.expiresAt) {
+    delete otpStore[phone];
+    return res.status(400).json({ success: false, message: 'OTP expired' });
+  }
+  if (record.otp !== otp) {
+    return res.status(400).json({ success: false, message: 'Invalid OTP' });
   }
 
-  const smsNumber = phone.slice(-10);
-
-  try {
-    const response = await axios.post(
-      FAST2SMS_OTP_VERIFY_URL,
-      { mobile: smsNumber, otp: String(otp) },
-      { headers: f2sHeaders }
-    );
-
-    if (response.data.return === true) {
-      return res.json({ success: true });
-    }
-    return res.status(400).json({ success: false, message: response.data.message || 'Invalid OTP' });
-  } catch (err) {
-    // Fast2SMS wrong OTP par 400, vaparelo OTP par 404 aape chhe
-    const status = err.response?.status;
-    if (status === 400 || status === 404) {
-      return res.status(400).json({
-        success: false,
-        message: err.response?.data?.message || 'Invalid OTP',
-      });
-    }
-    console.error('VERIFY-OTP ERROR:', err.response?.data || err.message);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
+  delete otpStore[phone];
+  res.json({ success: true });
 });
 
 app.listen(process.env.PORT || 3000, () => console.log('Server chalu chhe'));
