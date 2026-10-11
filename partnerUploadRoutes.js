@@ -172,6 +172,7 @@ const rejectLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardH
 
 router.options("/reject-partner", cors());
 router.post("/reject-partner", cors(), rejectLimiter, express.json({ limit: "10kb" }), async (req, res) => {
+  let adminOk = false; // the real reason is only shown to a verified admin
   try {
     const { partnerId, adminId } = req.body || {};
     if (typeof partnerId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(partnerId) || typeof adminId !== "string" || !adminId) {
@@ -186,6 +187,7 @@ router.post("/reject-partner", cors(), rejectLimiter, express.json({ limit: "10k
     const cfg = await db.collection("admin_config").doc("settings").get();
     const code = cfg.exists ? cfg.data().adminCode : null;
     if (!code || !sameSecret(code, adminId)) return res.status(403).json({ error: "Not allowed." });
+    adminOk = true;
 
     const ref = db.collection("partners").doc(partnerId);
     const snap = await ref.get();
@@ -218,8 +220,10 @@ router.post("/reject-partner", cors(), rejectLimiter, express.json({ limit: "10k
     await ref.delete();
     res.json({ ok: true, deletedFiles: paths.length, auth });
   } catch (err) {
-    console.error("reject partner failed:", err.message);
-    res.status(502).json({ error: "Could not delete the partner. Please try again." });
+    console.error("reject partner failed:", err.code || "", err.message);
+    res.status(502).json({ error: adminOk
+      ? "Could not delete the partner: " + (err.code ? err.code + " - " : "") + String(err.message).slice(0, 300)
+      : "Could not delete the partner. Please try again." });
   }
 });
 
