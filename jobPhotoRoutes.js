@@ -7,6 +7,7 @@
 // Render env vars (partner upload mate pehla thi chhe j): GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO
 
 const express = require('express');
+const crypto = require('crypto');
 const { getAuth } = require('firebase-admin/auth');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 
@@ -107,6 +108,71 @@ module.exports = (function () {
       return res.json({ ok: true, files });
     } catch (e) {
       console.error('job-photos error:', e);
+      return res.status(500).json({ ok: false, error: 'Server error: ' + e.message });
+    }
+  });
+
+  // ---------------------------------------------------------------
+  // POST /admin-job-photos  { jobId, adminId }
+  // Admin page photos jova mate. Admin ID admin_config/settings.adminCode sathe check thay chhe
+  // (admin page ma je check chhe e j). Photos private GitHub repo mathi aavi ne base64 ma pacha jay.
+  // ---------------------------------------------------------------
+  const smallJson = express.json({ limit: '10kb' });
+
+  function sameText(a, b) {
+    const x = Buffer.from(String(a));
+    const y = Buffer.from(String(b));
+    return x.length === y.length && crypto.timingSafeEqual(x, y);
+  }
+
+  async function githubGetRaw(path) {
+    const { GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO } = process.env;
+    const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${path}`;
+    const r = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${GITHUB_TOKEN}`,
+        Accept: 'application/vnd.github.raw',
+        'User-Agent': 'voltmaster-backend'
+      }
+    });
+    if (!r.ok) throw new Error(`GitHub read failed (${r.status})`);
+    return Buffer.from(await r.arrayBuffer());
+  }
+
+  router.post('/admin-job-photos', smallJson, async (req, res) => {
+    try {
+      const { jobId, adminId } = req.body || {};
+      if (!adminId || typeof adminId !== 'string' || adminId.length !== 10) {
+        return res.status(401).json({ ok: false, error: 'Admin ID galat chhe.' });
+      }
+      if (!jobId || typeof jobId !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(jobId)) {
+        return res.status(400).json({ ok: false, error: 'Job ID galat chhe.' });
+      }
+
+      const cfg = await getFirestore().collection('admin_config').doc('settings').get();
+      if (!cfg.exists || !cfg.data().adminCode || !sameText(cfg.data().adminCode, adminId)) {
+        return res.status(403).json({ ok: false, error: 'Admin ID galat chhe.' });
+      }
+
+      const jobSnap = await getFirestore().collection('serviceRequests').doc(jobId).get();
+      if (!jobSnap.exists) return res.status(404).json({ ok: false, error: 'Job malyo nahi.' });
+      const files = jobSnap.data().servicePhotos && jobSnap.data().servicePhotos.files;
+      if (!files || Object.keys(files).length === 0) {
+        return res.status(404).json({ ok: false, error: 'Aa job ma service photos nathi.' });
+      }
+
+      const photos = [];
+      for (const [key, path] of Object.entries(files)) {
+        // fakt aa j job na folder ni file j vanchay
+        if (typeof path !== 'string' || !path.startsWith(`job-photos/${jobId}/`) || path.includes('..')) continue;
+        const buf = await githubGetRaw(path);
+        photos.push({ key, data: 'data:image/jpeg;base64,' + buf.toString('base64') });
+      }
+      if (photos.length === 0) return res.status(404).json({ ok: false, error: 'Photos malya nahi.' });
+
+      return res.json({ ok: true, photos });
+    } catch (e) {
+      console.error('admin-job-photos error:', e);
       return res.status(500).json({ ok: false, error: 'Server error: ' + e.message });
     }
   });
