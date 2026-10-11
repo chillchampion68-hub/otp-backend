@@ -15,6 +15,7 @@ const KINDS = {
   "profile":      { folder: "profile",      suffix: "profile",       max: 5 * MB, types: ["jpg", "png", "webp", "gif"] },
   "aadhar-front": { folder: "aadhar-front", suffix: "aadhar_front",  max: 5 * MB, types: ["jpg", "png", "webp", "gif"] },
   "aadhar-back":  { folder: "aadhar-back",  suffix: "aadhar_back",   max: 5 * MB, types: ["jpg", "png", "webp", "gif"] },
+  "qualification": { folder: "qualification", suffix: "qualification", max: 5 * MB, types: ["jpg", "png", "webp", "gif", "pdf"] },
   "bank":         { folder: "bank",         suffix: "bank_document", max: 2 * MB, types: ["jpg", "png", "pdf"] },
 };
 const MIME = { jpg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif", pdf: "application/pdf" };
@@ -100,7 +101,7 @@ router.post("/upload-partner-file", cors(), limiter, receiveJson, async (req, re
 
 // Serves a stored file from the private repo. The 128-bit random name in the URL is the access key.
 router.get("/partner-file/:folder/:filename", cors(), async (req, res) => {
-  const m = /^[a-f0-9]{32}_(profile|aadhar_front|aadhar_back|bank_document)\.(jpg|png|webp|gif|pdf)$/.exec(req.params.filename);
+  const m = /^[a-f0-9]{32}_(profile|aadhar_front|aadhar_back|qualification|bank_document)\.(jpg|png|webp|gif|pdf)$/.exec(req.params.filename);
   const kind = m && Object.values(KINDS).find((k) => k.suffix === m[1]);
   if (!kind || kind.folder !== req.params.folder) return res.status(404).end();
   try {
