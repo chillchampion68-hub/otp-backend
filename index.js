@@ -14,6 +14,11 @@ const db = getFirestore(); // kept in case you need it elsewhere; not written to
 
 const app = express();
 app.use(cors());
+
+// Job completion photos -> private GitHub repo (see jobPhotoRoutes.js)
+// Aa express.json() pehla j hovu joiye, kem ke photo moti hoy chhe (15mb limit aa route ni potani chhe).
+app.use(require("./jobPhotoRoutes"));
+
 app.use(express.json());
 
 // Partner document upload -> private GitHub repo (see partnerUploadRoutes.js)
