@@ -6,6 +6,8 @@ const multer = require("multer");
 const cors = require("cors");
 const crypto = require("crypto");
 const rateLimit = require("express-rate-limit");
+const { getFirestore } = require("firebase-admin/firestore");
+const { getAuth } = require("firebase-admin/auth");
 
 const router = express.Router();
 const MB = 1024 * 1024;
@@ -120,6 +122,99 @@ router.get("/partner-file/:folder/:filename", cors(), async (req, res) => {
   } catch (err) {
     console.error("partner file fetch failed:", err.message);
     res.status(502).end();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Admin: reject a partner application.
+// Deletes (1) the uploaded files from the private GitHub repo, (2) the partner's Firebase login
+// account and (3) the Firestore partners/<id> document. Only for partners that are NOT approved.
+// The admin page sends the same 10-digit Admin ID it already uses; it is checked here against
+// Firestore admin_config/settings.adminCode.
+// ---------------------------------------------------------------------------
+const URL_FIELDS = ["profilePhotoUrl", "aadharFrontUrl", "aadharBackUrl", "qualificationDocUrl", "bankDocumentUrl"];
+const STORED_FILE = /^[a-f0-9]{32}_(profile|aadhar_front|aadhar_back|qualification|bank_document)\.(jpg|png|webp|gif|pdf)$/;
+const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
+
+// Only ever builds a path inside partner-uploads/<known folder>/<hash>_<suffix>.<ext>
+function repoPathFromUrl(url) {
+  if (typeof url !== "string") return null;
+  let u;
+  try { u = new URL(url); } catch (e) { return null; }
+  const m = /^\/partner-file\/([a-z-]+)\/([^/]+)$/.exec(u.pathname);
+  const f = m && STORED_FILE.exec(m[2]);
+  const kind = f && Object.values(KINDS).find((k) => k.suffix === f[1]);
+  if (!kind || kind.folder !== m[1]) return null;
+  return `partner-uploads/${kind.folder}/${m[2]}`;
+}
+
+async function deleteFromGitHub(path) {
+  const branch = process.env.GITHUB_BRANCH || "main";
+  const info = await gh(path, { query: `?ref=${encodeURIComponent(branch)}` });
+  if (info.status === 404) return; // already deleted
+  if (!info.ok) throw new Error(`GitHub GET ${info.status}`);
+  const { sha } = await info.json();
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    const r = await gh(path, { method: "DELETE", body: JSON.stringify({ message: `Delete ${path}`, sha, branch }) });
+    if (r.ok || r.status === 404) return;
+    if ((r.status === 409 || r.status >= 500) && attempt < 4) { await sleep(300 * attempt + Math.random() * 300); continue; }
+    throw new Error(`GitHub DELETE ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  }
+}
+
+function sameSecret(a, b) {
+  const x = Buffer.from(String(a)), y = Buffer.from(String(b));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
+
+const rejectLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false,
+  message: { error: "Too many attempts. Try again later." } });
+
+router.options("/reject-partner", cors());
+router.post("/reject-partner", cors(), rejectLimiter, express.json({ limit: "10kb" }), async (req, res) => {
+  try {
+    const { partnerId, adminId } = req.body || {};
+    if (typeof partnerId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(partnerId) || typeof adminId !== "string" || !adminId) {
+      return res.status(400).json({ error: "Invalid request." });
+    }
+    if (!process.env.GITHUB_TOKEN || !process.env.GITHUB_OWNER || !process.env.GITHUB_REPO) {
+      console.error("reject partner: GitHub env vars missing");
+      return res.status(500).json({ error: "Service is not available." });
+    }
+
+    const db = getFirestore();
+    const cfg = await db.collection("admin_config").doc("settings").get();
+    const code = cfg.exists ? cfg.data().adminCode : null;
+    if (!code || !sameSecret(code, adminId)) return res.status(403).json({ error: "Not allowed." });
+
+    const ref = db.collection("partners").doc(partnerId);
+    const snap = await ref.get();
+    if (!snap.exists) return res.json({ ok: true, alreadyDeleted: true });
+    const p = snap.data();
+    if (p.approvalStatus === "approved") {
+      return res.status(409).json({ error: "This partner is already approved and cannot be deleted." });
+    }
+
+    // 1) uploaded files in GitHub (any failure stops here, so the admin can simply press Reject again)
+    const paths = [...new Set(URL_FIELDS.map((k) => repoPathFromUrl(p[k])).filter(Boolean))];
+    for (const path of paths) await deleteFromGitHub(path);
+
+    // 2) Firebase login account (only if its email matches this application)
+    try {
+      const authUser = await getAuth().getUser(partnerId);
+      if (authUser.email && p.email && authUser.email.toLowerCase() === String(p.email).toLowerCase()) {
+        await getAuth().deleteUser(partnerId);
+      }
+    } catch (e) {
+      if (e.code !== "auth/user-not-found") throw e;
+    }
+
+    // 3) Firestore document
+    await ref.delete();
+    res.json({ ok: true, deletedFiles: paths.length });
+  } catch (err) {
+    console.error("reject partner failed:", err.message);
+    res.status(502).json({ error: "Could not delete the partner. Please try again." });
   }
 });
 
