@@ -8,6 +8,7 @@ const crypto = require("crypto");
 const rateLimit = require("express-rate-limit");
 const { getFirestore } = require("firebase-admin/firestore");
 const { getAuth } = require("firebase-admin/auth");
+const { getApps, initializeApp, cert } = require("firebase-admin/app");
 
 const router = express.Router();
 const MB = 1024 * 1024;
@@ -162,6 +163,12 @@ async function deleteFromGitHub(path) {
   }
 }
 
+// index.js normally initialises firebase-admin already; this only does it if nobody has yet.
+function ensureFirebaseAdmin() {
+  if (getApps().length) return;
+  initializeApp({ credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) });
+}
+
 function sameSecret(a, b) {
   const x = Buffer.from(String(a)), y = Buffer.from(String(b));
   return x.length === y.length && crypto.timingSafeEqual(x, y);
@@ -173,6 +180,7 @@ const rejectLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardH
 router.options("/reject-partner", cors());
 router.post("/reject-partner", cors(), rejectLimiter, express.json({ limit: "10kb" }), async (req, res) => {
   let adminOk = false; // the real reason is only shown to a verified admin
+  let step = "start";
   try {
     const { partnerId, adminId } = req.body || {};
     if (typeof partnerId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(partnerId) || typeof adminId !== "string" || !adminId) {
@@ -183,12 +191,15 @@ router.post("/reject-partner", cors(), rejectLimiter, express.json({ limit: "10k
       return res.status(500).json({ error: "Service is not available." });
     }
 
+    step = "admin-check";
+    ensureFirebaseAdmin();
     const db = getFirestore();
     const cfg = await db.collection("admin_config").doc("settings").get();
     const code = cfg.exists ? cfg.data().adminCode : null;
     if (!code || !sameSecret(code, adminId)) return res.status(403).json({ error: "Not allowed." });
     adminOk = true;
 
+    step = "load-partner";
     const ref = db.collection("partners").doc(partnerId);
     const snap = await ref.get();
     if (!snap.exists) return res.json({ ok: true, alreadyDeleted: true });
@@ -198,11 +209,13 @@ router.post("/reject-partner", cors(), rejectLimiter, express.json({ limit: "10k
     }
 
     // 1) uploaded files in GitHub (any failure stops here, so the admin can simply press Reject again)
+    step = "github-files";
     const paths = [...new Set(URL_FIELDS.map((k) => repoPathFromUrl(p[k])).filter(Boolean))];
     for (const path of paths) await deleteFromGitHub(path);
 
     // 2) Firebase login account (only if its email matches this application), so the same
     //    email can register again. auth: "deleted" | "not-found" | "email-mismatch"
+    step = "auth-account";
     let auth = "deleted";
     try {
       const authUser = await getAuth().getUser(partnerId);
@@ -217,13 +230,14 @@ router.post("/reject-partner", cors(), rejectLimiter, express.json({ limit: "10k
     }
 
     // 3) Firestore document
+    step = "firestore-delete";
     await ref.delete();
     res.json({ ok: true, deletedFiles: paths.length, auth });
   } catch (err) {
-    console.error("reject partner failed:", err.code || "", err.message);
-    res.status(502).json({ error: adminOk
-      ? "Could not delete the partner: " + (err.code ? err.code + " - " : "") + String(err.message).slice(0, 300)
-      : "Could not delete the partner. Please try again." });
+    console.error("reject partner failed at step [" + step + "]:", err.code || "", err.message);
+    res.status(502).json({ error: "Could not delete the partner (step: " + step + ")." + (adminOk
+      ? " " + (err.code ? err.code + " - " : "") + String(err.message).slice(0, 300)
+      : "") });
   }
 });
 
