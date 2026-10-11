@@ -1,5 +1,6 @@
 // jobPhotoRoutes.js
-// POST /job-photos  -> partner job complete photos (indoor/outdoor/serial) GitHub ma save kare
+// POST /job-photos  -> partner service SHARU karta pehla na photos (indoor/outdoor/serial) GitHub ma save kare
+//                      ane job ne 'accepted' mathi 'working' kari de. (OTP kaam purun thaya pachhi, app ma)
 //
 // index.js ma: app.use(require('./jobPhotoRoutes'));  (express.json() pehla mukvu)
 //
@@ -71,8 +72,8 @@ module.exports = (function () {
       if (!jobSnap.exists) return res.status(404).json({ ok: false, error: 'Job malyo nahi.' });
       const job = jobSnap.data();
       if (job.partnerId !== uid) return res.status(403).json({ ok: false, error: 'Aa job tamaro nathi.' });
-      if (job.status !== 'working') {
-        return res.status(400).json({ ok: false, error: 'Job "working" status ma hovo joiye.' });
+      if (job.status !== 'accepted') {
+        return res.status(400).json({ ok: false, error: 'Aa job ma photos pehla thi upload thai gaya chhe ke job accepted nathi.' });
       }
 
       // 4) badha photo GitHub ma save
@@ -92,9 +93,11 @@ module.exports = (function () {
         files[p.key] = path;
       }
 
-      // 5) job doc ma path save (aa thi j wallet credit unlock thase)
+      // 5) job doc ma photo path save + status 'working' (OTP have kaam purun thaya pachhi lagshe)
       await jobRef.update({
-        completionPhotos: {
+        status: 'working',
+        startedAt: FieldValue.serverTimestamp(),
+        servicePhotos: {
           files,
           uploadedBy: uid,
           uploadedAt: FieldValue.serverTimestamp()
