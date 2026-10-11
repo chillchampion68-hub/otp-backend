@@ -199,19 +199,24 @@ router.post("/reject-partner", cors(), rejectLimiter, express.json({ limit: "10k
     const paths = [...new Set(URL_FIELDS.map((k) => repoPathFromUrl(p[k])).filter(Boolean))];
     for (const path of paths) await deleteFromGitHub(path);
 
-    // 2) Firebase login account (only if its email matches this application)
+    // 2) Firebase login account (only if its email matches this application), so the same
+    //    email can register again. auth: "deleted" | "not-found" | "email-mismatch"
+    let auth = "deleted";
     try {
       const authUser = await getAuth().getUser(partnerId);
       if (authUser.email && p.email && authUser.email.toLowerCase() === String(p.email).toLowerCase()) {
         await getAuth().deleteUser(partnerId);
+      } else {
+        auth = "email-mismatch";
       }
     } catch (e) {
       if (e.code !== "auth/user-not-found") throw e;
+      auth = "not-found";
     }
 
     // 3) Firestore document
     await ref.delete();
-    res.json({ ok: true, deletedFiles: paths.length });
+    res.json({ ok: true, deletedFiles: paths.length, auth });
   } catch (err) {
     console.error("reject partner failed:", err.message);
     res.status(502).json({ error: "Could not delete the partner. Please try again." });
