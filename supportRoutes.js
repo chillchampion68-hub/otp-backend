@@ -348,6 +348,7 @@ function createSupport(deps) {
         id: r.id, ticketNo: r.ticketNo ? String(r.ticketNo) : null, type: r.type || '', description: r.description || '',
         status: r.status || '', bookingId: r.bookingId || '', createdAt: iso(r.createdAt),
         userId: r.userId || '', phone: r.phone || '', email: r.email || '',
+        resolvedAt: iso(r.resolvedAt), resolvedBy: r.resolvedBy || '', resolvedById: r.resolvedById || '',
         customerName: (info[r.bookingId] || {}).customerName || '', service: (info[r.bookingId] || {}).service || '',
       })),
     });
@@ -361,7 +362,15 @@ function createSupport(deps) {
     const ref = complaintsCol().doc(body.id);
     const snap = await ref.get();
     if (!snap.exists || snap.data().source !== 'ai_assistant') return R(404, { error: 'not_found' });
-    await ref.update({ status: body.status, updatedAt: serverTimestamp(), updatedBy: g.who });
+    const upd = { status: body.status, updatedAt: serverTimestamp(), updatedBy: g.who };
+    const doneNow = ['resolved', 'closed'].includes(lower(body.status));
+    const wasDone = ['resolved', 'closed', 'solved'].includes(lower(snap.data().status));
+    if (doneNow && !wasDone) {           // remember WHO finished it (owner or which staff) so the owner can see each person's work
+      upd.resolvedAt = serverTimestamp(); upd.resolvedBy = g.name || g.who; upd.resolvedById = g.who;
+    } else if (!doneNow) {
+      upd.resolvedAt = null; upd.resolvedBy = ''; upd.resolvedById = '';
+    }
+    await ref.update(upd);
     return R(200, { ok: true, status: body.status });
   }
 
