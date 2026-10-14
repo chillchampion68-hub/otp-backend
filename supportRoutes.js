@@ -349,6 +349,7 @@ function createSupport(deps) {
         status: r.status || '', bookingId: r.bookingId || '', createdAt: iso(r.createdAt),
         userId: r.userId || '', phone: r.phone || '', email: r.email || '',
         resolvedAt: iso(r.resolvedAt), resolvedBy: r.resolvedBy || '', resolvedById: r.resolvedById || '',
+        handledBy: r.handledBy || '', handledByName: r.handledByName || '', handledAt: iso(r.handledAt),
         customerName: (info[r.bookingId] || {}).customerName || '', service: (info[r.bookingId] || {}).service || '',
       })),
     });
