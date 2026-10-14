@@ -204,7 +204,8 @@ function createSupport(deps) {
   });
 
   // ---------- 4) complaints ----------
-  const isOpen = (c) => !['resolved', 'closed'].includes(lower(c.status));
+  // statuses the existing admin page uses: pending / under review / resolved / solved / rejected (+ 'closed')
+  const isOpen = (c) => !['resolved', 'closed', 'solved', 'rejected'].includes(lower(c.status));
 
   const complaint = guard(async (id, body) => {
     const type = COMPLAINT_TYPES.includes(body.type) ? body.type : null;
@@ -257,11 +258,81 @@ function createSupport(deps) {
     return R(200, { tickets: list.slice(0, 20) });
   });
 
+  // ---------- admin access: owner (Google email) or staff (10-digit number + password) ----------
+  const staffCol = () => db.collection('admin_staff');   // not in Firestore rules => browsers can never read it
+  const MAX_FAILS = 5, LOCK_MS = 15 * 60 * 1000, ADMIN_TTL = 12 * 3600 * 1000;
+  const hashPw = (pw, salt) => crypto.scryptSync(pw, salt, 32).toString('hex');
+
+  async function adminGate(headers) {
+    const tok = headers && headers['x-vm-admin'] ? verifyToken(headers['x-vm-admin'], secret, now()) : null;
+    if (tok && tok.t === 'adm' && /^\d{10}$/.test(tok.s)) {
+      const s = await staffCol().doc(tok.s).get();       // re-checked every call, so disabling takes effect at once
+      if (s.exists && s.data().active !== false) return { who: 'staff:' + tok.s, kind: 'staff', name: s.data().name || '' };
+      return { resp: R(401, { error: 'unauthorized' }) };
+    }
+    const d = await verifyBearer(headers);
+    if (!isGoogle(d)) return { resp: R(401, { error: 'unauthorized' }) };
+    if (!adminEmails.includes(lower(d.email))) return { resp: R(403, { error: 'forbidden' }) };
+    return { who: lower(d.email), kind: 'owner', name: 'Owner' };
+  }
+  async function adminMe(headers) {
+    const g = await adminGate(headers);
+    return g.resp || R(200, { ok: true, kind: g.kind, who: g.who, name: g.name || '' });
+  }
+  async function ownerGate(headers) {
+    const g = await adminGate(headers);
+    if (g.resp) return g;
+    return g.kind === 'owner' ? g : { resp: R(403, { error: 'forbidden' }) };
+  }
+
+  async function adminLogin(headers, body) {
+    const bad = R(401, { error: 'invalid_credentials' });
+    const phone = last10(body.phone), pw = String(body.password || '');
+    if (!/^\d{10}$/.test(phone) || !pw || pw.length > 200) return bad;
+    const ref = staffCol().doc(phone);
+    const snap = await ref.get();
+    const d = snap.exists ? snap.data() : null;
+    const h = hashPw(pw, d && d.salt ? d.salt : 'unknown-user-salt');     // always hash: timing does not reveal if the number exists
+    if (!d || d.active === false || !d.passwordHash) return bad;
+    if (d.lockUntil && d.lockUntil > now()) return R(429, { error: 'locked' });
+    const a = Buffer.from(h), b = Buffer.from(String(d.passwordHash));
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      const f = (d.failCount || 0) + 1;
+      await ref.update(f >= MAX_FAILS ? { failCount: 0, lockUntil: now() + LOCK_MS } : { failCount: f });
+      return bad;
+    }
+    if (d.failCount || d.lockUntil) await ref.update({ failCount: 0, lockUntil: 0 });
+    const token = signToken({ t: 'adm', s: phone, exp: now() + ADMIN_TTL }, secret);
+    if (!token) return R(503, { error: 'server_not_configured' });
+    return R(200, { token, name: d.name || '', expiresInSec: ADMIN_TTL / 1000 });
+  }
+
+  async function staffList(headers) {
+    const g = await ownerGate(headers);
+    if (g.resp) return g.resp;
+    const snap = await staffCol().get();
+    return R(200, { staff: snap.docs.map((x) => ({ phone: x.id, name: x.data().name || '', active: x.data().active !== false })) });
+  }
+  async function staffSave(headers, body) {
+    const g = await ownerGate(headers);
+    if (g.resp) return g.resp;
+    const phone = last10(body.phone), pw = String(body.password || '');
+    if (!/^\d{10}$/.test(phone) || String(body.phone || '').replace(/\D/g, '').length > 12) return R(400, { error: 'invalid_phone' });
+    if (pw && (pw.length < 8 || pw.length > 100)) return R(400, { error: 'weak_password' });
+    const ref = staffCol().doc(phone);
+    const ex = await ref.get();
+    if (!ex.exists && !pw) return R(400, { error: 'password_required' });
+    const old = ex.exists ? ex.data() : {};
+    const next = { ...old, name: cleanText(body.name != null ? body.name : old.name, 60), active: typeof body.active === 'boolean' ? body.active : old.active !== false, updatedAt: serverTimestamp(), updatedBy: g.who };
+    if (pw) { const salt = crypto.randomBytes(16).toString('hex'); Object.assign(next, { salt, passwordHash: hashPw(pw, salt), failCount: 0, lockUntil: 0 }); }
+    await ref.set(next);
+    return R(200, { ok: true, phone });
+  }
+
   // ---------- 5) admin: AI complaints ----------
   async function adminAiComplaints(headers) {
-    const d = await verifyBearer(headers);
-    if (!isGoogle(d)) return R(401, { error: 'unauthorized' });
-    if (!adminEmails.includes(lower(d.email))) return R(403, { error: 'forbidden' });
+    const g = await adminGate(headers);
+    if (g.resp) return g.resp;
     const snap = await complaintsCol().where('source', '==', 'ai_assistant').get();
     const rows = snap.docs.map((x) => ({ id: x.id, ...x.data() }));
     rows.sort((a, b) => String((iso(b.createdAt)) || '').localeCompare(String(iso(a.createdAt) || '')));
@@ -284,18 +355,17 @@ function createSupport(deps) {
 
   const STATUSES = ['Pending', 'In Progress', 'Resolved', 'Closed'];
   async function adminSetStatus(headers, body) {
-    const d = await verifyBearer(headers);
-    if (!isGoogle(d)) return R(401, { error: 'unauthorized' });
-    if (!adminEmails.includes(lower(d.email))) return R(403, { error: 'forbidden' });
+    const g = await adminGate(headers);
+    if (g.resp) return g.resp;
     if (!STATUSES.includes(body.status) || !validId(body.id)) return R(400, { error: 'invalid_request' });
     const ref = complaintsCol().doc(body.id);
     const snap = await ref.get();
     if (!snap.exists || snap.data().source !== 'ai_assistant') return R(404, { error: 'not_found' });
-    await ref.update({ status: body.status, updatedAt: serverTimestamp(), updatedBy: lower(d.email) });
+    await ref.update({ status: body.status, updatedAt: serverTimestamp(), updatedBy: g.who });
     return R(200, { ok: true, status: body.status });
   }
 
-  return { identify, bookings, refund, cancelPrepare, cancelConfirm, complaint, complaintsMine, adminAiComplaints, adminSetStatus };
+  return { identify, bookings, refund, cancelPrepare, cancelConfirm, complaint, complaintsMine, adminAiComplaints, adminSetStatus, adminLogin, adminMe, staffList, staffSave };
 }
 
 // ---------- wiring for index.js ----------
@@ -348,6 +418,10 @@ function createRouter(support, express) {
   router.post('/support/complaints/mine', wrap(support.complaintsMine));
   router.get('/support/admin/ai-complaints', wrap((h) => support.adminAiComplaints(h)));
   router.post('/support/admin/complaint-status', wrap(support.adminSetStatus));
+  router.post('/support/admin/login', wrap(support.adminLogin));
+  router.get('/support/admin/me', wrap((h) => support.adminMe(h)));
+  router.get('/support/admin/staff', wrap((h) => support.staffList(h)));
+  router.post('/support/admin/staff', wrap(support.staffSave));
   return router;
 }
 
