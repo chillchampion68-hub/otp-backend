@@ -282,7 +282,20 @@ function createSupport(deps) {
     });
   }
 
-  return { identify, bookings, refund, cancelPrepare, cancelConfirm, complaint, complaintsMine, adminAiComplaints };
+  const STATUSES = ['Pending', 'In Progress', 'Resolved', 'Closed'];
+  async function adminSetStatus(headers, body) {
+    const d = await verifyBearer(headers);
+    if (!isGoogle(d)) return R(401, { error: 'unauthorized' });
+    if (!adminEmails.includes(lower(d.email))) return R(403, { error: 'forbidden' });
+    if (!STATUSES.includes(body.status) || !validId(body.id)) return R(400, { error: 'invalid_request' });
+    const ref = complaintsCol().doc(body.id);
+    const snap = await ref.get();
+    if (!snap.exists || snap.data().source !== 'ai_assistant') return R(404, { error: 'not_found' });
+    await ref.update({ status: body.status, updatedAt: serverTimestamp(), updatedBy: lower(d.email) });
+    return R(200, { ok: true, status: body.status });
+  }
+
+  return { identify, bookings, refund, cancelPrepare, cancelConfirm, complaint, complaintsMine, adminAiComplaints, adminSetStatus };
 }
 
 // ---------- wiring for index.js ----------
@@ -334,6 +347,7 @@ function createRouter(support, express) {
   router.post('/support/complaint', wrap(support.complaint));
   router.post('/support/complaints/mine', wrap(support.complaintsMine));
   router.get('/support/admin/ai-complaints', wrap((h) => support.adminAiComplaints(h)));
+  router.post('/support/admin/complaint-status', wrap(support.adminSetStatus));
   return router;
 }
 
