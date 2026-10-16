@@ -29,6 +29,13 @@ app.use(require("./partnerUploadRoutes"));
 
 // AI Customer Support endpoints (/support/*) - see supportRoutes.js
 app.use(createRouter(buildFromEnv({ db, auth: getAuth() }), express));
+// Health check for UptimeRobot
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    service: 'VoltMaster OTP Backend'
+  });
+});
 
 const FAST2SMS_API_KEY = process.env.FAST2SMS_API_KEY;
 const FAST2SMS_URL = 'https://www.fast2sms.com/dev/bulkV2';
